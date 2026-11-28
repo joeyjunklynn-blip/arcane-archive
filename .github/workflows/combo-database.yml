@@ -1,50 +1,47 @@
-name: Download Combo Database
-
+name: Build Native Combo Database
 on:
   workflow_dispatch:
-
 permissions:
-  contents: read
-
+  contents: write
 jobs:
-  download-combos:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download Commander Spellbook database
-        run: |
-          curl --fail --location --retry 3 \
-            --max-time 600 \
-            "https://json.commanderspellbook.com/variants.json.gz" \
-            --output variants.download
-
-      - name: Validate and extract database
+      - uses: actions/checkout@v4
+      - name: Download source
+        run: curl --fail --location --retry 3 --max-time 600 https://json.commanderspellbook.com/variants.json.gz -o /tmp/variants.gz
+      - name: Build compressed detail sections
         run: |
           python3 - <<'PY'
-          import gzip
-          import json
+          import gzip, json
           from pathlib import Path
-
-          raw = Path("variants.download").read_bytes()
-
-          if raw.startswith(b"\x1f\x8b"):
-              raw = gzip.decompress(raw)
-
-          data = json.loads(raw)
-          Path("variants.json").write_bytes(raw)
-
-          print("Database successfully validated!")
-          print("Database size:", len(raw), "bytes")
-
-          if isinstance(data, dict):
-              print("Database fields:", list(data.keys()))
-          elif isinstance(data, list):
-              print("Total records:", len(data))
+          raw = Path('/tmp/variants.gz').read_bytes()
+          source = json.loads(gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw)
+          index = json.loads(Path('combo-index.json').read_text())
+          assert source['version'] == index['version'], 'Source version changed; rebuild index first'
+          ids = [r[0] for r in index['variants']]
+          wanted = set(ids)
+          records = {}
+          keys = ('id','uses','requires','produces','identity','manaNeeded','easyPrerequisites','notablePrerequisites','description','notes','legalities','bracketTag','popularity')
+          for v in source['variants']:
+              if v['id'] not in wanted: continue
+              d = {k:v[k] for k in keys if k in v}
+              d['uses'] = [{**u, 'card':{'id':u['card']['id']}} for u in v['uses']]
+              records[v['id']] = d
+          assert len(records) == len(ids) == len(wanted), 'Index IDs missing or duplicated; no files published'
+          for start in range(0,len(ids),1000):
+              shard = {i:records[i] for i in ids[start:start+1000]}
+              payload = json.dumps(shard,ensure_ascii=False,separators=(',',':')).encode()
+              Path(f'combo-details-{start//1000}.json.gz').write_bytes(gzip.compress(payload,mtime=0))
+          Path('combo-detail-map.json').write_text(json.dumps({'version':index['version'],'shards':[i//1000 for i in range(len(ids))]},separators=(',',':')))
+          print('Validated',len(ids),'combo records')
           PY
-
-      - name: Save database as downloadable artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: commander-spellbook-database
-          path: variants.json
-          retention-days: 7
+      - name: Commit generated database
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add combo-detail-map.json combo-details-*.json.gz
+          if ! git diff --cached --quiet; then
+            git commit -m 'Build native combo detail database'
+            git push
+          fi
