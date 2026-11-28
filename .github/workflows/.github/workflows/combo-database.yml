@@ -1,0 +1,50 @@
+name: Download Combo Database
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download-combos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Commander Spellbook database
+        run: |
+          curl --fail --location --retry 3 \
+            --max-time 600 \
+            "https://json.commanderspellbook.com/variants.json.gz" \
+            --output variants.download
+
+      - name: Validate and extract database
+        run: |
+          python3 - <<'PY'
+          import gzip
+          import json
+          from pathlib import Path
+
+          raw = Path("variants.download").read_bytes()
+
+          if raw.startswith(b"\x1f\x8b"):
+              raw = gzip.decompress(raw)
+
+          data = json.loads(raw)
+          Path("variants.json").write_bytes(raw)
+
+          print("Database successfully validated!")
+          print("Database size:", len(raw), "bytes")
+
+          if isinstance(data, dict):
+              print("Database fields:", list(data.keys()))
+          elif isinstance(data, list):
+              print("Total records:", len(data))
+          PY
+
+      - name: Save database as downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: commander-spellbook-database
+          path: variants.json
+          retention-days: 7
